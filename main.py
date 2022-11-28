@@ -8,8 +8,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('filename')
 parser.add_argument('--device', type=str, default='cpu')
 parser.add_argument('--model', type=str, default='Salesforce/codegen-350M-multi')
-parser.add_argument('--batch_size', type=int, default=8)
-parser.add_argument('--max_length', type=int, default=512)
+parser.add_argument('--batch_size', type=int, default=4)
+parser.add_argument('--max_length', type=int, default=2048)
 parser.add_argument('--output', type=str, default='out.html')
 
 HTML_TEMPLATE = """
@@ -102,7 +102,10 @@ ROW_TEMPLATE = """
 """
 
 def _get_str(tensor):
-    return str(tensor.cpu().tolist())
+    if torch.is_tensor(tensor):
+        return str(tensor.cpu().tolist())
+    else:
+        return str(tensor)
 
 def _get_color(attr):
     # clip values to prevent CSS errors (Values should be from [-1,1])
@@ -143,24 +146,25 @@ def get_result_html(file_name, input_text, tokenizer, inputs, output_probs, best
                 body_content.append(tag_content)
 
             suggest_rows = []
-            pred_ids = best_next_tokens_list[span_idx - 1] 
+            pred_ids = best_next_tokens_list[span_idx - 1].indices
+            pred_probs = best_next_tokens_list[span_idx - 1].values
             for token_idx, token in enumerate(tokenizer.convert_ids_to_tokens(pred_ids)):
                 suggest_rows.append(ROW_TEMPLATE \
                         .strip() \
                         .replace("{suggestion}", token) \
-                        .replace("{probability}", _get_str(output_probs[span_idx - 1][pred_ids[token_idx]])))
+                        .replace("{probability}", _get_str(pred_probs[token_idx])))
 
             table_suggestions = TABLE_TEMPLATE \
                     .strip() \
                     .replace("{tag_id}", str(span_idx)) \
                     .replace("{tag_text}", tag_text) \
-                    .replace("{tag_probability}", _get_str(output_probs[span_idx - 1][input_ids[span_idx]])) \
+                    .replace("{tag_probability}", _get_str(output_probs[span_idx - 1])) \
                     .replace("{table_content}", ''.join(suggest_rows))
 
             tag_content = TAG_TEMPLATE \
                     .strip() \
                     .replace("{tag_id}", str(span_idx)) \
-                    .replace("{text_color}", _get_color(output_probs[span_idx - 1][input_ids[span_idx]])) \
+                    .replace("{text_color}", _get_color(output_probs[span_idx - 1])) \
                     .replace("{tag_text}", tag_text) \
                     .replace("{table_suggestions}", table_suggestions)
 
@@ -172,10 +176,6 @@ def get_result_html(file_name, input_text, tokenizer, inputs, output_probs, best
             .replace("{body_content}", ''.join(body_content))
                 
 def get_batches_from_input_ids(input_ids, batch_size, max_length):
-    all_input_batches = []
-    all_attn_batches = []
-    all_pred_batches = []
-    all_length_batches = []
 
     input_batch = []
     attn_batch = []
@@ -193,28 +193,29 @@ def get_batches_from_input_ids(input_ids, batch_size, max_length):
         
         batch[:, :seq_length] = input_ids[:, begin:ix]
         attn[:, :seq_length] = 1
-        
+
         input_batch.append(batch)
         attn_batch.append(attn)
         pred_batch.append(input_ids[0, ix])
         length_batch.append(seq_length - 1)
         
         batch_count += 1
-        if batch_count > batch_size or ix == len(input_ids[0]) - 1:
-            all_input_batches.append(torch.cat(input_batch, dim=0))
-            all_attn_batches.append(torch.cat(attn_batch, dim=0))
-            all_pred_batches.append(pred_batch)
-            all_length_batches.append(length_batch)
+
+        if batch_count >= batch_size or ix == len(input_ids[0]) - 1:
+            input_batch = torch.cat(input_batch, dim=0)
+            attn_batch = torch.cat(attn_batch, dim=0)
+
+            yield input_batch, attn_batch, pred_batch, length_batch
+
             input_batch = []
             attn_batch = []
             pred_batch = []
             length_batch = []
             batch_count = 0
 
-    return all_input_batches, all_attn_batches, all_pred_batches, all_length_batches
-
 if __name__ == '__main__':
     args = parser.parse_args()
+    print(args)
 
     device = args.device
     batch_size = args.batch_size
@@ -234,26 +235,29 @@ if __name__ == '__main__':
     print("Finished loading model")
 
     inputs = tokenizer(file_content, return_tensors="pt", return_offsets_mapping=True).to(device)
+    input_ids = inputs['input_ids']
 
-    all_input_batches, all_attn_batches, all_pred_batches, all_length_batches = get_batches_from_input_ids(inputs['input_ids'], max_length, batch_size)
-        
     best_next_tokens_list = []
     probs_list = []
 
-    for batch_ix, batch in tqdm(enumerate(all_input_batches), total=len(all_input_batches)):
-        # print(f'batch: {batch_ix}')
-        batch_outputs = model(batch.to(device), attention_mask=all_attn_batches[batch_ix].to(device))
+    for batch_ix, batch in tqdm(
+            enumerate(get_batches_from_input_ids(input_ids, batch_size, max_length)), 
+            total=math.ceil(len(input_ids[0]) / batch_size)
+        ):
+        input_batch, attn_batch, pred_batch, length_batch = batch
+        # print(f'batch: {batch_ix}, {batch.size()}')
+        batch_outputs = model(input_batch.to(device), attention_mask=attn_batch.to(device))
 #     batch_outputs = model(batch.to(device))
 
-        for token_ix, token in enumerate(all_pred_batches[batch_ix]):
+        for token_ix, token in enumerate(pred_batch):
 #         print(token_ix, all_pred_batches[batch_ix])
-            next_token_logits = batch_outputs.logits[token_ix, all_length_batches[batch_ix][token_ix], :]
+            next_token_logits = batch_outputs.logits[token_ix, length_batch[token_ix], :]
             next_token_scores = torch.nn.functional.softmax(
                 next_token_logits, dim=-1
             )
             best_next_tokens = torch.topk(next_token_scores, 5, dim=-1)
-            best_next_tokens_list.append(best_next_tokens.indices)
-            probs_list.append(next_token_scores)
+            best_next_tokens_list.append(best_next_tokens)
+            probs_list.append(next_token_scores[token])
 
             # print(f'{tokenizer.convert_ids_to_tokens([token])} - {next_token_scores[token]} - best match: {tokenizer.convert_ids_to_tokens(best_next_tokens.indices)}')
 
