@@ -1,9 +1,9 @@
 import torch
 import argparse
 import math
-import gc
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
+from packaging import version
 
 parser = argparse.ArgumentParser()
 parser.add_argument('filename')
@@ -128,10 +128,8 @@ def process_tag_text(tag_text):
             .replace("\t", "    ")
 
 def get_result_html(file_name, input_text, tokenizer, inputs, output_probs, best_next_tokens_list):
-    current_idx = 0
     span_start = 0
     offset_mapping = inputs['offset_mapping'][0]
-    input_ids = inputs['input_ids'][0]
 
     body_content = [] 
     for span_idx, [span_start, span_end] in enumerate(offset_mapping):
@@ -147,8 +145,8 @@ def get_result_html(file_name, input_text, tokenizer, inputs, output_probs, best
                 body_content.append(tag_content)
 
             suggest_rows = []
-            pred_ids = best_next_tokens_list[span_idx - 1].indices
-            pred_probs = best_next_tokens_list[span_idx - 1].values
+            pred_ids, pred_probs = best_next_tokens_list[span_idx - 1]
+
             for token_idx, token in enumerate(tokenizer.convert_ids_to_tokens(pred_ids)):
                 suggest_rows.append(ROW_TEMPLATE \
                         .strip() \
@@ -214,10 +212,56 @@ def get_batches_from_input_ids(input_ids, batch_size, max_length):
             length_batch = []
             batch_count = 0
 
-if __name__ == '__main__':
-    args = parser.parse_args()
-    print(args)
+def torch_jit_model_eval(model, example_batch):
+    try:
+        jit_model = model.eval()
+        with torch.no_grad():
+            if version.parse(version.parse(torch.__version__).base_version) >= version.parse("1.14.0"):
+                if isinstance(example_batch, dict):
+                    jit_model = torch.jit.trace(jit_model, example_kwarg_inputs=example_batch, strict=False)
+                else:
+                    jit_model = torch.jit.trace(
+                        jit_model,
+                        example_kwarg_inputs={key: example_batch[key] for key in example_batch},
+                        strict=False,
+                    )
+            else:
+                jit_inputs = []
+                for key in example_batch:
+                    example_tensor = torch.ones_like(example_batch[key])
+                    jit_inputs.append(example_tensor)
+                jit_inputs = tuple(jit_inputs)
+                jit_model = torch.jit.trace(jit_model, jit_inputs, strict=False)
+        jit_model = torch.jit.freeze(jit_model)
+        jit_model(**example_batch)
+        jit_model(**example_batch)
+        model = jit_model
+    except (RuntimeError, TypeError, ValueError, NameError, IndexError) as e:
+        print(f"failed to use PyTorch jit mode due to: {e}.")
 
+    return model
+
+def train_iter(model, model_inputs, pred_batch, length_batch):
+    best_next_tokens_list = []
+    probs_list = []
+
+    batch_outputs = model(**model_inputs)
+    # batch_outputs = model(batch.to(device))
+
+    for token_ix, token in enumerate(pred_batch):
+#         print(token_ix, all_pred_batches[batch_ix])
+        next_token_logits = batch_outputs.logits[token_ix, length_batch[token_ix], :]
+        next_token_scores = torch.nn.functional.softmax(
+            next_token_logits, dim=-1
+        )
+        best_next_tokens = torch.topk(next_token_scores, 5, dim=-1)
+
+        best_next_tokens_list.append((best_next_tokens.indices.detach().numpy(), best_next_tokens.values.detach().numpy()))
+        probs_list.append(next_token_scores[token].detach().numpy())
+
+    return best_next_tokens_list, probs_list
+
+def main(args):
     device = args.device
     batch_size = args.batch_size
     max_length = args.max_length
@@ -240,29 +284,34 @@ if __name__ == '__main__':
 
     best_next_tokens_list = []
     probs_list = []
+    jit_model = None
 
     for batch_ix, batch in tqdm(
             enumerate(get_batches_from_input_ids(input_ids, batch_size, max_length)), 
             total=math.ceil(len(input_ids[0]) / batch_size)
         ):
-        gc.collect()
-
         input_batch, attn_batch, pred_batch, length_batch = batch
+        model_inputs = {
+            'input_ids': input_batch.to(device),
+            'attention_mask': attn_batch.to(device),
+        }
+
+        if jit_model is None:
+            jit_model = torch_jit_model_eval(model, model_inputs)
+            del model
         # print(f'batch: {batch_ix}, {batch.size()}')
-        batch_outputs = model(input_batch.to(device), attention_mask=attn_batch.to(device))
-#     batch_outputs = model(batch.to(device))
-
-        for token_ix, token in enumerate(pred_batch):
-#         print(token_ix, all_pred_batches[batch_ix])
-            next_token_logits = batch_outputs.logits[token_ix, length_batch[token_ix], :]
-            next_token_scores = torch.nn.functional.softmax(
-                next_token_logits, dim=-1
-            )
-            best_next_tokens = torch.topk(next_token_scores, 5, dim=-1)
-            best_next_tokens_list.append(best_next_tokens)
-            probs_list.append(next_token_scores[token])
-
-            # print(f'{tokenizer.convert_ids_to_tokens([token])} - {next_token_scores[token]} - best match: {tokenizer.convert_ids_to_tokens(best_next_tokens.indices)}')
+        
+        with torch.no_grad():
+            best_next_tokens, probs = train_iter(jit_model, model_inputs, pred_batch, length_batch)
+        
+        best_next_tokens_list.extend(best_next_tokens)
+        probs_list.extend(probs)
 
     with open(args.output, 'w') as output_file:
         output_file.write(get_result_html(file_name, file_content, tokenizer, inputs, probs_list, best_next_tokens_list))
+
+if __name__ == '__main__':
+    args = parser.parse_args()
+    print(args)
+
+    main(args)
