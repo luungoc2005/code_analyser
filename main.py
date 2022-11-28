@@ -1,5 +1,6 @@
 import torch
 import argparse
+import math
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 
@@ -95,7 +96,7 @@ TABLE_TEMPLATE = """
 """
 ROW_TEMPLATE = """
 <tr>
-    <td>{suggestion}</td>
+    <td>[ {suggestion} ]</td>
     <td style="text-align: right;">{probability}</td>
 </tr>
 """
@@ -105,7 +106,7 @@ def _get_str(tensor):
 
 def _get_color(attr):
     # clip values to prevent CSS errors (Values should be from [-1,1])
-    threshold = 0.001
+    threshold = 0.01
     attr = max(0, min(1, attr))
     if attr > threshold:
         hue = 120
@@ -114,7 +115,7 @@ def _get_color(attr):
     else:
         hue = 0
         sat = 75
-        lig = 100 - int(40 * (attr / threshold))
+        lig = 100 + 10 * int(math.log10(attr))
     return "hsl({}, {}%, {}%)".format(hue, sat, lig)
 
 def process_tag_text(tag_text):
@@ -122,7 +123,7 @@ def process_tag_text(tag_text):
             .replace("\n", "<br>") \
             .replace("\t", "    ")
 
-def get_result_html(input_text, tokenizer, inputs, output_probs, best_next_tokens_list):
+def get_result_html(file_name, input_text, tokenizer, inputs, output_probs, best_next_tokens_list):
     current_idx = 0
     span_start = 0
     offset_mapping = inputs['offset_mapping'][0]
@@ -167,7 +168,8 @@ def get_result_html(input_text, tokenizer, inputs, output_probs, best_next_token
 
     return HTML_TEMPLATE \
             .strip() \
-            .replace('{body_content}', ''.join(body_content))
+            .replace("{site_title}", file_name) \
+            .replace("{body_content}", ''.join(body_content))
                 
 def get_batches_from_input_ids(input_ids, batch_size, max_length):
     all_input_batches = []
@@ -218,8 +220,10 @@ if __name__ == '__main__':
     batch_size = args.batch_size
     max_length = args.max_length
 
+    file_name = ""
     with open(args.filename, 'r') as input_file:
         file_content = input_file.read()
+        file_name = input_file.name
     
     if file_content == '':
         exit()
@@ -254,4 +258,4 @@ if __name__ == '__main__':
             # print(f'{tokenizer.convert_ids_to_tokens([token])} - {next_token_scores[token]} - best match: {tokenizer.convert_ids_to_tokens(best_next_tokens.indices)}')
 
     with open(args.output, 'w') as output_file:
-        output_file.write(get_result_html(file_content, tokenizer, inputs, probs_list, best_next_tokens_list))
+        output_file.write(get_result_html(file_name, file_content, tokenizer, inputs, probs_list, best_next_tokens_list))
