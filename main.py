@@ -1,6 +1,7 @@
 import torch
 import argparse
 import math
+import gc
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 
@@ -244,6 +245,8 @@ if __name__ == '__main__':
             enumerate(get_batches_from_input_ids(input_ids, batch_size, max_length)), 
             total=math.ceil(len(input_ids[0]) / batch_size)
         ):
+        gc.collect()
+
         input_batch, attn_batch, pred_batch, length_batch = batch
         # print(f'batch: {batch_ix}, {batch.size()}')
         batch_outputs = model(input_batch.to(device), attention_mask=attn_batch.to(device))
