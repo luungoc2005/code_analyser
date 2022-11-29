@@ -234,7 +234,6 @@ def torch_jit_model_eval(model, example_batch):
                 jit_model = torch.jit.trace(jit_model, jit_inputs, strict=False)
         jit_model = torch.jit.freeze(jit_model)
         jit_model(**example_batch)
-        jit_model(**example_batch)
         model = jit_model
     except (RuntimeError, TypeError, ValueError, NameError, IndexError) as e:
         print(f"failed to use PyTorch jit mode due to: {e}.")
@@ -246,18 +245,19 @@ def train_iter(model, model_inputs, pred_batch, length_batch):
     probs_list = []
 
     batch_outputs = model(**model_inputs)
-    # batch_outputs = model(batch.to(device))
+    logits = batch_outputs[0]
+    # print([[idx, item.size()] for idx, item in enumerate(batch_outputs) if hasattr(item, 'size')])
 
     for token_ix, token in enumerate(pred_batch):
 #         print(token_ix, all_pred_batches[batch_ix])
-        next_token_logits = batch_outputs.logits[token_ix, length_batch[token_ix], :]
+        next_token_logits = logits[token_ix, length_batch[token_ix], :]
         next_token_scores = torch.nn.functional.softmax(
             next_token_logits, dim=-1
         )
         best_next_tokens = torch.topk(next_token_scores, 5, dim=-1)
 
-        best_next_tokens_list.append((best_next_tokens.indices.detach().numpy(), best_next_tokens.values.detach().numpy()))
-        probs_list.append(next_token_scores[token].detach().numpy())
+        best_next_tokens_list.append((best_next_tokens.indices.detach().cpu().numpy(), best_next_tokens.values.detach().cpu().numpy()))
+        probs_list.append(next_token_scores[token].detach().cpu().numpy())
 
     return best_next_tokens_list, probs_list
 
@@ -275,7 +275,7 @@ def main(args):
         exit()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model).to(device)
+    model = AutoModelForCausalLM.from_pretrained(args.model, torchscript=True).to(device)
 
     print("Finished loading model")
 
@@ -298,7 +298,6 @@ def main(args):
 
         if jit_model is None:
             jit_model = torch_jit_model_eval(model, model_inputs)
-            del model
         # print(f'batch: {batch_ix}, {batch.size()}')
         
         with torch.no_grad():
