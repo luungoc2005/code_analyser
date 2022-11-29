@@ -1,6 +1,7 @@
 import torch
 import argparse
 import math
+import html
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 from packaging import version
@@ -123,7 +124,7 @@ def _get_color(attr):
     return "hsl({}, {}%, {}%)".format(hue, sat, lig)
 
 def process_tag_text(tag_text):
-    return tag_text \
+    return html.escape(tag_text) \
             .replace("\n", "<br>") \
             .replace("\t", "    ")
 
@@ -272,6 +273,7 @@ def main(args):
         file_name = input_file.name
     
     if file_content == '':
+        print('Empty input file')
         exit()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
@@ -306,7 +308,7 @@ def main(args):
         best_next_tokens_list.extend(best_next_tokens)
         probs_list.extend(probs)
 
-    with open(args.output, 'w') as output_file:
+    with open(args.output, 'w', encoding='utf8') as output_file:
         output_file.write(get_result_html(file_name, file_content, tokenizer, inputs, probs_list, best_next_tokens_list))
 
 if __name__ == '__main__':
