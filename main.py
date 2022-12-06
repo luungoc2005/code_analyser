@@ -12,6 +12,7 @@ parser.add_argument('--device', type=str, default='cpu')
 parser.add_argument('--model', type=str, default='Salesforce/codegen-350M-multi')
 parser.add_argument('--batch_size', type=int, default=4)
 parser.add_argument('--max_length', type=int, default=2048)
+parser.add_argument('--jit', action='store_true')
 parser.add_argument('--output', type=str, default='out.html')
 
 HTML_TEMPLATE = """
@@ -217,22 +218,20 @@ def torch_jit_model_eval(model, example_batch):
     try:
         jit_model = model.eval()
         with torch.no_grad():
-            if version.parse(version.parse(torch.__version__).base_version) >= version.parse("1.14.0"):
-                if isinstance(example_batch, dict):
-                    jit_model = torch.jit.trace(jit_model, example_kwarg_inputs=example_batch, strict=False)
+            with torch.jit.optimized_execution(True):
+                if version.parse(version.parse(torch.__version__).base_version) >= version.parse("1.14.0"):
+                    if isinstance(example_batch, dict):
+                        jit_model = torch.jit.trace(jit_model, example_kwarg_inputs=example_batch, strict=False)
+                    else:
+                        jit_model = torch.jit.trace(
+                            jit_model,
+                            example_kwarg_inputs={key: example_batch[key] for key in example_batch},
+                            strict=False,
+                        )
                 else:
-                    jit_model = torch.jit.trace(
-                        jit_model,
-                        example_kwarg_inputs={key: example_batch[key] for key in example_batch},
-                        strict=False,
-                    )
-            else:
-                jit_inputs = []
-                for key in example_batch:
-                    example_tensor = torch.ones_like(example_batch[key])
-                    jit_inputs.append(example_tensor)
-                jit_inputs = tuple(jit_inputs)
-                jit_model = torch.jit.trace(jit_model, jit_inputs, strict=False)
+                    print(f"requires Pytorch 1.14 to use jit mode")
+                    # don't want to bother fixing this...
+                    return jit_model
         jit_model = torch.jit.freeze(jit_model)
         jit_model(**example_batch)
         model = jit_model
@@ -299,7 +298,10 @@ def main(args):
         }
 
         if jit_model is None:
-            jit_model = torch_jit_model_eval(model, model_inputs)
+            if args.jit:
+                jit_model = torch_jit_model_eval(model, model_inputs)
+            else:
+                jit_model = model
         # print(f'batch: {batch_ix}, {batch.size()}')
         
         with torch.no_grad():
