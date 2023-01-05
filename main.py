@@ -240,7 +240,7 @@ def torch_jit_model_eval(model, example_batch):
 
     return model
 
-def train_iter(model, model_inputs, pred_batch, length_batch):
+def predict_iter(model, model_inputs, pred_batch, length_batch):
     best_next_tokens_list = []
     probs_list = []
 
@@ -305,7 +305,7 @@ def main(args):
         # print(f'batch: {batch_ix}, {batch.size()}')
         
         with torch.no_grad():
-            best_next_tokens, probs = train_iter(jit_model, model_inputs, pred_batch, length_batch)
+            best_next_tokens, probs = predict_iter(jit_model, model_inputs, pred_batch, length_batch)
         
         best_next_tokens_list.extend(best_next_tokens)
         probs_list.extend(probs)
